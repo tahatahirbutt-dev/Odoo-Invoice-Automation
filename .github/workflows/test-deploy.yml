@@ -42,7 +42,7 @@ jobs:
           echo "✓ .env.example exists"
 
       - name: Validate Docker Compose
-        run: docker-compose config > /dev/null
+        run: docker compose config > /dev/null
 
       - name: Check documentation
         run: |
@@ -91,11 +91,11 @@ jobs:
         uses: docker/setup-buildx-action@v2
 
       - name: Build Docker images
-        run: docker-compose build --no-cache
+        run: docker compose build --no-cache
 
       - name: Validate containers start
         run: |
-          docker-compose up -d
+          docker compose up -d
           sleep 30
-          docker-compose ps
-          docker-compose down
+          docker compose ps
+          docker compose down
