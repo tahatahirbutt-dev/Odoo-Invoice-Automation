@@ -1,4 +1,4 @@
-version: '3.8'
+
 
 services:
   # PostgreSQL Database for Odoo and n8n
@@ -47,6 +47,18 @@ services:
     restart: unless-stopped
     command: odoo --db_host=postgres --db_port=5432 --db_user=odoo --db_password=odoopass123 --database=odoo
 
+  # CloudFlared
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared_tunnel
+    command: tunnel --no-autoupdate run
+    volumes:
+      - ./.cloudflared:/etc/cloudflared:ro
+    networks:
+      - invoice_network
+    restart: unless-stopped
+    depends_on:
+      - n8n
 
   # n8n Automation Platform
   n8n:
@@ -54,9 +66,12 @@ services:
     container_name: n8n_invoice_automation
     environment:
       # Basic n8n settings
-      N8N_HOST: ${N8N_URL:-localhost}
+      N8N_HOST: n8n.tahatahirbutt.me
       N8N_PORT: 5678
-      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: https://n8n.tahatahirbutt.me/
+      N8N_SECURE_COOKIE: "true"
+      
       
       # PostgreSQL backend for n8n (optional, uses SQLite by default)
       DB_TYPE: postgresdb
@@ -67,6 +82,7 @@ services:
       DB_POSTGRESDB_PASSWORD: odoopass123
       
       # Execution settings
+      
       N8N_EXECUTION_MODE: regular  # Use 'queue' for production
       N8N_EXECUTION_TIMEOUT: 600   # 10 minutes
       N8N_EXECUTION_DATA_SAVE_ON_SUCCESS: "true"
@@ -76,6 +92,10 @@ services:
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID}
       ODOO_USER: ${ODOO_USER}
       ODOO_PASSWORD: ${ODOO_PASSWORD}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      META_VERIFY_TOKEN: ${META_VERIFY_TOKEN}
+      ODOO_URL: "http://odoo:8069"
+      ODOO_DB: "odoo"
       
       # Logging
       N8N_LOG_LEVEL: ${N8N_LOG_LEVEL:-info}
@@ -86,7 +106,7 @@ services:
       
       # Security (update in production)
       N8N_USER_MANAGEMENT_DISABLED: "false"
-      N8N_SECURE_COOKIE: "false"  # Set to 'true' for HTTPS
+      
       
       # Optional: Analytics
       N8N_ANALYTICS: "false"

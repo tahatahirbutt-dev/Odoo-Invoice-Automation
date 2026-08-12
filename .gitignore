@@ -57,3 +57,7 @@ Thumbs.db
 
 # n8n runtime data (contains encrypted credentials/config)
 n8n_files/
+
+#cloudfare tunnel credentials
+.cloudflared/
+cloudflared.exe
