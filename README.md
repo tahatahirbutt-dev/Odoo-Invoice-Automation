@@ -241,8 +241,8 @@ LIMIT 10;
 
 ## 📄 License
 
-MIT License © 2026 Taha Tahir
+MIT License © 2026 Taha Tahir Butt
 
 ---
 
-*Maintained by Taha Tahir — Islamabad, Pakistan. Built and debugged against a real Odoo instance, not a tutorial sandbox.*
+*Maintained by Taha Tahir Butt— Islamabad, Pakistan. Built and debugged against a real Odoo instance, not a tutorial sandbox.*
