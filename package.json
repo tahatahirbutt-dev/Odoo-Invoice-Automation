@@ -2,8 +2,7 @@
   "name": "odoo-invoice-automation",
   "version": "1.0.0",
   "description": "Automated invoice PDF delivery via WhatsApp using Odoo ERP and n8n",
-  "main": "index.js",
-  "author": "Taha Tahir",
+  "author": "Taha Tahir Butt",
   "license": "MIT",
   "keywords": [
     "odoo",
@@ -17,7 +16,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/Odoo-Invoice-Automation.git"
+    "url": "https://github.com/tahatahirbutt-dev/Odoo-Invoice-Automation.git"
   },
   "scripts": {
     "dev": "docker-compose up",
@@ -29,9 +28,7 @@
     "clean": "docker-compose down -v",
     "restart": "docker-compose restart n8n",
     "test": "npm run test:connection",
-    "test:connection": "echo 'Run manual tests in QUICKSTART.md'",
-    "backup": "bash ./backup.sh",
-    "deploy": "bash ./deploy.sh"
+    "test:connection": "echo 'Run manual tests in QUICKSTART.md'"
   },
   "engines": {
     "node": ">=22.0.0",
@@ -41,12 +38,5 @@
   "devDependencies": {
     "dotenv": "^16.3.1"
   },
-  "dependencies": {},
-  "optionalDependencies": {
-    "pm2": "^5.3.0",
-    "aws-cli": "^1.27.0"
-  },
-  "engines": {
-    "node": ">=22.0.0"
-  }
+  "dependencies": {}
 }
