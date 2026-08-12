@@ -23,7 +23,7 @@
         "url": "http://odoo:8069/web/session/authenticate",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "{\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"db\": \"odoo\",\n    \"login\": \"admin\",\n    \"password\": \"admin\"\n  }\n}",
+        "jsonBody": "{\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"db\": \"odoo\",\n    \"login\": \"{{$env.ODOO_USER}}\",\n    \"password\": \"{{$env.ODOO_PASSWORD}}\"\n  }\n}",
         "options": {
           "response": {
             "response": {
@@ -108,6 +108,36 @@
       ],
       "id": "49e3588c-5984-4696-9b0d-38b641b197b4",
       "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "content": "## Serve Invoice PDFs\nBuilt: 2026-07-08 | Stateless webhook, no file storage\n\nTwilio's WhatsApp API fetches media from a URL rather than\naccepting attachments directly. This workflow exists solely to\nanswer that fetch: re-authenticates to Odoo and re-renders the\nrequested invoice fresh, every single call.\n\nMust be toggled **Active** (not just open) for the webhook to\nrespond — Test URL only fires once per manual click.",
+        "height": 336,
+        "width": 1392
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -880,
+        -576
+      ],
+      "id": "122ac91f-3109-479d-8229-7f58842f6ebc",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "### Note on Odoo auth\nThis uses session-cookie auth (web login), NOT the same as the\nuid/JSON-RPC auth used in the main workflow's search_read calls.\nOdoo genuinely has two separate auth systems — this one is\nrequired specifically for the PDF report engine.",
+        "height": 464,
+        "color": "#FBDC0E"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        144,
+        208
+      ],
+      "id": "3553ee78-7bb0-416e-aa84-cee94cfa39aa",
+      "name": "Sticky Note1"
     }
   ],
   "pinData": {},
@@ -163,7 +193,7 @@
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "23e9c0d3-f418-4d82-8d75-975f4d9689c8",
+  "versionId": "e2c4a1d4-be9e-40cd-b9ba-36a77e84f3d8",
   "meta": {
     "instanceId": "3ba22a21b4f43fda87a6406853dd8a83e9b892ed400089a9e6f03bb16f4fb9a6"
   },

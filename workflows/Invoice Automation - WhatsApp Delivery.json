@@ -165,7 +165,7 @@
         "url": "http://odoo:8069/jsonrpc",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"service\": \"object\",\n    \"method\": \"execute_kw\",\n    \"args\": [\n      \"odoo\",\n      {{$('Odoo Authenticate').item.json.result}},\n      \"admin\",\n      \"res.partner\",\n      \"read\",\n      [[{{$('Loop Over Invoices').item.json.partner_id[0]}}]],\n      {\n        \"fields\": [\"name\", \"mobile\", \"phone\"]\n      }\n    ]\n  }\n}",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"service\": \"object\",\n    \"method\": \"execute_kw\",\n    \"args\": [\n      \"odoo\",\n      {{$('Odoo Authenticate').item.json.result}},\n      \"{{$env.ODOO_PASSWORD}}\",\n      \"res.partner\",\n      \"read\",\n      [[{{$('Loop Over Invoices').item.json.partner_id[0]}}]],\n      {\n        \"fields\": [\"name\", \"mobile\", \"phone\"]\n      }\n    ]\n  }\n}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -205,7 +205,7 @@
             {
               "id": "548be241-cd98-4dff-8cd8-1ea5fda1253e",
               "name": "media_url",
-              "value": "=https://freeness-curliness-unbitten.ngrok-free.dev/webhook/invoice-pdf?invoice_id={{$('Loop Over Invoices').item.json.id}}",
+              "value": "=https://{{$env.PUBLIC_BASE_URL}}/webhook/invoice-pdf?invoice_id={{$('Loop Over Invoices').item.json.id}}",
               "type": "string"
             }
           ]
@@ -342,7 +342,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
       "position": [
-        2592,
+        2944,
         -80
       ],
       "id": "03ba215b-fe03-45bc-85c3-c109c40c001a",
@@ -353,6 +353,53 @@
           "name": "Postgres account"
         }
       }
+    },
+    {
+      "parameters": {
+        "content": "## Invoice Automation – WhatsApp Delivery\nBuilt & tested end-to-end: 2026-07-09\nAuthor: Taha Tahir\n\nPolls Odoo every 2 hours for newly posted invoices, generates each\nPDF live, checks the customer has a WhatsApp number on file, sends\nvia Twilio, and logs every outcome (sent or skipped) to Postgres.\n\nDepends on: **Serve Invoice PDFs** workflow being Active — that's\nwhat actually serves the PDF to Twilio. See its sticky note for why.",
+        "height": 320,
+        "width": 1232
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -304,
+        -624
+      ],
+      "id": "b76515a0-80e4-43d0-b782-77fa82022e43",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "### Why this filter exists\nOdoo returns `false` (not null/empty string) for blank fields.\nNaive \"is not empty\" checks let blank numbers through silently.\nExplicit check: `field && field !== false ? field : ''`\nFull writeup: DEBUGGING_LOG.md, bug #6",
+        "height": 272,
+        "width": 448,
+        "color": "#FFCE47"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1856,
+        -576
+      ],
+      "id": "a6cd0c9b-3179-4120-b4d9-e87088654ce9",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "### For future reference\n- delivery_status only ever writes 'sent' or 'skipped_no_phone'\n  right now — schema has room for 'failed'/'retrying' if retry\n  logic gets added later (see init.sql comments)\n- No retry logic built yet — a failed Twilio send today just fails,\n  it doesn't get logged separately from a successful queue",
+        "height": 304,
+        "width": 368,
+        "color": "#90BBEA"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3184,
+        -336
+      ],
+      "id": "c0264324-a64b-4706-8fc9-d41ac71d23e5",
+      "name": "Sticky Note2"
     }
   ],
   "pinData": {},
@@ -536,7 +583,7 @@
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "b428e5c6-c9ac-47ca-bf64-4a9e71b0cc9e",
+  "versionId": "85c7a028-b4cb-4709-a23a-b0cb231f2d40",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "3ba22a21b4f43fda87a6406853dd8a83e9b892ed400089a9e6f03bb16f4fb9a6"
