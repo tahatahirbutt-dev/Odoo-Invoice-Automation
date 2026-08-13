@@ -79,7 +79,8 @@ This system is **two independent n8n workflows**, not one — that split is the 
 │       ↓                                                            │
 │  Respond to Webhook (binary PDF)                                    │
 │                                                                      │
-│  Exposed publicly via ngrok tunnel so Twilio's servers can fetch it. │
+│  Exposed publicly via a permanent Cloudflare named tunnel               │
+│  (https://n8n.tahatahirbutt.me) so Twilio's servers can fetch it.       │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -101,7 +102,7 @@ The fix was to **stop treating PDF generation as a one-time event and start trea
 | **Automation Engine** | n8n (latest, self-hosted) | Workflow orchestration |
 | **Database** | PostgreSQL 16 | n8n backend + invoice delivery audit log |
 | **Messaging** | Twilio WhatsApp API (Sandbox) | PDF delivery channel |
-| **Tunneling** | ngrok (static domain) | Exposes the local PDF-serving webhook publicly |
+| **Tunneling** | Cloudflare Tunnel (named, permanent) | Exposes n8n publicly at a fixed domain — no port forwarding, no public IP |
 | **Containerization** | Docker Compose | All services on a shared bridge network |
 | **API Integration** | Odoo JSON-RPC + session-cookie auth | Two separate Odoo auth flows (see below) |
 
@@ -114,12 +115,12 @@ The fix was to **stop treating PDF generation as a one-time event and start trea
 ### Prerequisites
 - Docker Desktop (with sufficient drive sharing enabled for bind mounts, if used)
 - A Twilio account with WhatsApp Sandbox enabled, and a recipient number that has joined the sandbox
-- ngrok account (free tier is sufficient)
+- A domain and a Cloudflare account (free tier) for the named tunnel, or your own reverse-proxy equivalent if you're not using Cloudflare
 
 ### 1. Clone and configure environment
 
 ```bash
-git clone https://github.com/Bindas69/Odoo-Invoice-Automation.git
+git clone https://github.com/tahatahirbutt-dev/Odoo-Invoice-Automation.git
 cd Odoo-Invoice-Automation
 cp .env.example .env
 ```
@@ -129,6 +130,7 @@ Edit `.env`:
 ODOO_USER=admin
 ODOO_PASSWORD=admin
 TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxx
+PUBLIC_BASE_URL=n8n.yourdomain.com
 ```
 
 > **Note on `N8N_BLOCK_ENV_ACCESS_IN_NODE`:** this project references `ODOO_USER`, `ODOO_PASSWORD`, and `TWILIO_ACCOUNT_SID` via `{{$env.VAR}}` expressions inside node parameters, rather than hardcoding them into committed workflow JSON. This requires `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` in `docker-compose.yml` (already set). Be aware: n8n has a known cosmetic bug where the expression editor shows a red "access to env vars denied" warning even when the value resolves correctly at execution time — confirmed via n8n's own GitHub issue tracker. Trust the **Execute step** output, not the inline preview.
@@ -143,19 +145,19 @@ docker-compose up -d
 
 This brings up PostgreSQL, Odoo, and n8n on a shared `invoice_network`. Odoo's Invoicing app needs to be installed manually on first run (Settings → Apps → search "Invoicing" → Install), and the admin user needs **Billing Administrator** access rights explicitly set (Settings → Users → Access Rights → Invoicing) — Odoo's UI can visually show a permission as set without it actually committing to the underlying access-control group, so verify this directly if you hit `AccessError` on `account.move`.
 
-### 3. Start ngrok
+### 3. Cloudflare Tunnel
 
-```bash
-ngrok http 5678
-```
+The tunnel runs as its own service inside `docker-compose.yml` (`cloudflared`, reading config from `./.cloudflared`) — it comes up automatically with the rest of the stack in step 2, there's no separate command to run.
 
-Copy the forwarding URL (e.g. `https://xxxx.ngrok-free.dev`) — this is what Workflow 1's `Format WhatsApp Number` node uses to build the `media_url` Twilio fetches from.
+To point it at your own domain: authenticate `cloudflared` locally (`cloudflared tunnel login`), create a named tunnel, route it to your domain via DNS, and drop the resulting credentials file into `./.cloudflared/`. Set `PUBLIC_BASE_URL` in `.env` to that domain — this is what `Format WhatsApp Number` uses to build `media_url`, and what n8n itself uses for `N8N_HOST`/`WEBHOOK_URL`.
 
 ### 4. Import both workflows into n8n
 
-Import `workflows/Invoice Automation - WhatsApp Delivery.json` and `workflows/Serve Invoice PDFs.json`. Update the ngrok URL inside `Format WhatsApp Number` to match your current tunnel (ngrok's free tier issues a new URL on restart unless you're on a static domain).
+Import `workflows/Invoice Automation - WhatsApp Delivery.json` and `workflows/Serve Invoice PDFs.json`. Both reference `{{$env.PUBLIC_BASE_URL}}` rather than a hardcoded URL, so no manual editing is needed as long as `.env` is set correctly.
 
 **Activate Workflow 2 first** (toggle "Active" — webhooks only respond when the workflow is saved and active, not just open in the editor), then test Workflow 1.
+
+**Note:** In this repo, Workflow 1 is committed in an *inactive* state. That's deliberate, not a bug — Twilio's free trial caps outbound WhatsApp at 5 messages/day and its Sandbox connection expires periodically, so leaving a 2-hour schedule trigger running continuously against a free-tier account produces silent failures rather than a working pipeline. Activate it once you're on a paid Twilio tier (or have migrated to Meta's Cloud API) for genuinely unattended operation.
 
 ### 5. Verify
 
@@ -172,7 +174,7 @@ docker exec -it postgres_invoice_automation psql -U odoo -d invoice_automation_l
 
 ## 🐛 Real Bugs Hit While Building This
 
-Full write-ups are in `DEBUGGING_LOG.md`. Summary, because this is genuinely useful signal for anyone evaluating this repo:
+Full write-ups are in `DEBUGGING_LOG.md` (build phase) and `DEPLOYMENT_LOG.md` (taking it public — Cloudflare, Meta webhook, and a credential audit). Summary, because this is genuinely useful signal for anyone evaluating this repo:
 
 | Bug | Root Cause | Fix |
 |---|---|---|
@@ -183,6 +185,8 @@ Full write-ups are in `DEBUGGING_LOG.md`. Summary, because this is genuinely use
 | IF filter broke on empty mobile field | Odoo returns boolean `false` (not `null`/`""`) for empty fields | Explicit normalization: `field !== false ? field : ''` |
 | PDF file wouldn't write to disk | Node.js `fs.access()` writability check gives false negatives on Docker-Windows bind mounts | Abandoned disk writes entirely; switched to stateless webhook re-fetch |
 | GitHub Push Protection blocked commit | Twilio Account SID hardcoded directly in a node's URL field | Replaced with `{{$env.TWILIO_ACCOUNT_SID}}` expression |
+| Two nodes still had hardcoded Odoo `admin`/`admin` after the env-var migration was believed complete | Migration was done node-by-node across sessions; two nodes across two different workflow files were missed | Found via direct audit of exported JSON (not assumed from memory), replaced both with `{{$env.*}}` — see `DEPLOYMENT_LOG.md` |
+| `media_url` still pointed at an ngrok domain after moving to Cloudflare Tunnel | ngrok was still working locally, so nothing broke — the reference just wasn't updated when the infrastructure changed | Replaced with `{{$env.PUBLIC_BASE_URL}}`, tied to the permanent domain |
 
 ---
 
@@ -234,8 +238,8 @@ LIMIT 10;
 
 ## 📈 What's Next
 
-- **Project #2:** AI Customer Support Agent (n8n AI Agent node + Odoo Inventory JSON-RPC for real-time stock queries)
-- **Project #3:** Production DevOps — migrate this stack to a live VPS with monitoring and alerting
+- **Project #2:** AI Inventory Assistant — n8n AI Agent node + Odoo Inventory JSON-RPC for real-time stock/price Q&A over WhatsApp ([complete](https://github.com/tahatahirbutt-dev/Odoo-AI-Assistant))
+- **Project #3:** Automated Payment Reminders — staged WhatsApp reminders for overdue invoices, reusing most of this stack (Odoo, Postgres, Twilio)
 
 ---
 
