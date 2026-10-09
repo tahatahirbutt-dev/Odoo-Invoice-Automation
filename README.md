@@ -1,96 +1,103 @@
-# 📧 Odoo Invoice Automation – Automated PDF Delivery via WhatsApp
+# 📧 Odoo Invoice Automation – PDF Delivery via WhatsApp
 
-**A production-tested n8n system that detects posted invoices in Odoo ERP, fetches their PDFs live via a stateless webhook, and delivers them to customers over WhatsApp through Twilio — with a full PostgreSQL audit trail.**
+**An n8n system that finds posted invoices in Odoo, sends each customer their invoice PDF over WhatsApp (Twilio), and records every outcome in a PostgreSQL audit table.**
 
-![Status](https://img.shields.io/badge/Status-Working%20End--to--End-brightgreen)
+![Status](https://img.shields.io/badge/Status-Working%20demo%20(laptop--hosted)-yellow)
 ![License](https://img.shields.io/badge/License-MIT-blue)
-![n8n](https://img.shields.io/badge/n8n-latest-orange)
+![n8n](https://img.shields.io/badge/n8n-self--hosted-orange)
 ![Odoo](https://img.shields.io/badge/Odoo-17.0-red)
 ![Docker](https://img.shields.io/badge/Docker-Compose-blue)
 
 ---
 
-## 🎯 Overview
+## 🎯 Status — read this first
 
-This isn't a tutorial project — it's a working automation built and debugged against a real Odoo instance, with all the friction that involves (session auth quirks, Docker volume permission bugs, n8n expression-evaluation edge cases). The `DEBUGGING_LOG.md` in this repo documents that process in detail, because the troubleshooting is honestly as representative of the job as the finished workflow.
+| | |
+|---|---|
+| **What is verified** | On 2026-10-08 the current workflows delivered a real invoice PDF to a real WhatsApp number through the Twilio sandbox, via the public Cloudflare tunnel, with the audit row written. Earlier fixes were verified step by step (see `DEBUGGING_LOG.md`). |
+| **What it is not** | Not a production deployment. It runs in Docker on a laptop (only while the machine is awake), messages go through a Twilio **trial sandbox** (5 messages/day, recipients must join the sandbox), and the main workflow is committed **inactive** for that reason. |
+| **Not yet exercised** | The failed-send branch (built, but no failure has occurred since it was added) and an apostrophe in a customer name (the schema accepts it — checked in CI — but the n8n parameterized insert has not been run with one). |
 
-**What it does, end to end:**
-
-1. **Trigger** → n8n runs on a schedule (cron), authenticates to Odoo via JSON-RPC
-2. **Fetch** → Pulls all posted customer invoices (`account.move`, `move_type = out_invoice`, `state = posted`)
-3. **Loop** → Processes each invoice individually (batch size 1, for clean error isolation)
-4. **Generate PDF** → Authenticates a session cookie against Odoo, then fetches the invoice PDF live from Odoo's report engine — no PDFs are ever written to disk (see architecture note below on why)
-5. **Get contact** → Fetches the customer's WhatsApp-capable phone number from their Odoo contact record, in parallel with the PDF fetch
-6. **Filter** → Skips (and logs) any invoice whose customer has no valid mobile number, instead of failing the whole run
-7. **Deliver** → Sends the invoice via Twilio WhatsApp API, with the PDF served through a second, independent n8n webhook workflow that Twilio fetches from directly
-8. **Log** → Every outcome — sent or skipped — is written to a PostgreSQL audit table
-
-**Business case:** replaces manual invoice-by-invoice WhatsApp sending with a scheduled, hands-off pipeline. For an SME sending even 20-30 invoices/week, this removes real recurring admin time and gives an auditable delivery record accountants actually want.
+This is a portfolio project built and debugged against a real Odoo instance. The two logs record the bugs honestly, including the ones found after the first version "worked".
 
 ---
 
-## 📊 System Architecture
+## ⚙️ What it does
 
-This system is **two independent n8n workflows**, not one — that split is the key architectural decision, explained below.
+1. **Trigger** – n8n runs on a schedule (every 2 hours) and logs in to Odoo over JSON-RPC.
+2. **Skip what was already sent** – reads the audit table and excludes every invoice that already has a `sent` row.
+3. **Fetch** – gets posted customer invoices (`account.move`, `out_invoice`, `posted`) not in that list.
+4. **Loop** – one invoice at a time, so a problem with one invoice cannot affect the others. Every branch returns to the loop.
+5. **Contact** – reads the customer's **Mobile** field from Odoo. (`Phone` is ignored on purpose: it is often a landline or a number without a country code.)
+6. **Filter** – no usable mobile number → logged as `skipped_no_phone`, and the run continues.
+7. **Sign the link** – builds a PDF link valid for 1 hour, signed with HMAC-SHA256 (see below).
+8. **Send** – Twilio WhatsApp API, with `MediaUrl` pointing at the signed link.
+9. **Log** – `sent`, `skipped_no_phone` or `failed` is written to PostgreSQL. A failed send goes to its own branch and the run continues.
+
+**Business case:** replaces sending invoices one by one by hand with a scheduled pipeline and an audit record accountants can query.
+
+---
+
+## 📊 Architecture
+
+Two independent n8n workflows:
 
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│  WORKFLOW 1: Invoice Automation - WhatsApp Delivery                │
-│                                                                      │
-│  Schedule Trigger                                                  │
-│       ↓                                                            │
-│  Odoo Authenticate (JSON-RPC login → uid)                          │
-│       ↓                                                            │
-│  Fetch Unpaid/New Invoices (account.move search_read)              │
-│       ↓                                                            │
-│  Split Invoice Array → Loop Over Invoices (batch size 1)           │
-│       ↓                                                            │
-│  Get Odoo Session (session-cookie auth) → Extract Session ID       │
-│       ↓                                                            │
-│  ┌─────────────────────┐        ┌───────────────────────────┐     │
-│  │ Fetch Invoice PDF    │        │ Get Customer Contact       │     │
-│  │ (parallel branch)    │        │ (parallel branch)          │     │
-│  └──────────┬───────────┘        └────────────┬────────────────┘   │
-│             └──────────────┬────────────────────┘                  │
-│                             ↓                                       │
-│                  Merge PDF + Contact                                │
-│                             ↓                                       │
-│              Filter - Has Mobile Number?                            │
-│              ┌──────────────┴──────────────┐                        │
-│           YES↓                          NO ↓                        │
-│    Format WhatsApp Number          Skipped - No Mobile Number       │
-│              ↓                              ↓                       │
-│      Send via Twilio (media_url        Log Skip to Postgres         │
-│       points at Workflow 2)                                         │
-│              ↓                                                      │
-│    Log Delivery to Postgres                                         │
-│              ↓                                                      │
-│    (loops back to next invoice)                                     │
-└────────────────────────────────────────────────────────────────────┘
+WORKFLOW 1: Invoice Automation - WhatsApp Delivery (schedule, every 2 h)
 
-┌────────────────────────────────────────────────────────────────────┐
-│  WORKFLOW 2: Serve Invoice PDFs (stateless webhook)                 │
-│                                                                      │
-│  Webhook (GET /invoice-pdf?invoice_id=N)                            │
-│       ↓                                                            │
-│  Get Odoo Session → Extract Session ID                              │
-│       ↓                                                            │
-│  Fetch Invoice PDF (live, by invoice_id from query param)           │
-│       ↓                                                            │
-│  Respond to Webhook (binary PDF)                                    │
-│                                                                      │
-│  Exposed publicly via a permanent Cloudflare named tunnel               │
-│  (https://n8n.tahatahirbutt.me) so Twilio's servers can fetch it.       │
-└────────────────────────────────────────────────────────────────────┘
+ Schedule → Get Sent Invoice IDs (Postgres) → Odoo Authenticate → Fetch Unsent Invoices
+   → Split Invoice Array → Loop Over Invoices (batch size 1) ◄─────────────────────────┐
+        → Get Customer Contact → Filter - Has Mobile Number                             │
+              │ yes                               │ no                                  │
+              ▼                                   ▼                                     │
+        Format WhatsApp Number              Skipped → Log Skip to Postgres ─────────────┤
+              → Sign PDF Link (HMAC)                                                    │
+              → Build Media URL                                                         │
+              → Send via Twilio ──ok──→ Log Delivery to Postgres ───────────────────────┤
+                       └──error──→ Log Failure to Postgres ─────────────────────────────┘
+
+WORKFLOW 2: Serve Invoice PDFs (webhook GET /webhook/invoice-pdf?invoice_id&exp&token)
+
+ Webhook → Compute Expected Token (HMAC) → Link Valid?
+              │ yes: id is 1-9 digits, not expired, token matches
+              ▼
+        Get Odoo Session → Extract Session ID → Fetch Invoice PDF → Respond (PDF)
+              │ no
+              ▼
+        Reject 403   (Odoo is never contacted)
 ```
 
-### Why two workflows instead of one?
+### Why two workflows
 
-Twilio's WhatsApp API doesn't accept file attachments in the send request — it takes a `MediaUrl` and **fetches the file itself**, server-side, at send time. That means whatever URL you give it has to be publicly reachable and return the file live, independent of whatever n8n execution generated it.
+Twilio's WhatsApp API does not take file attachments. It takes a `MediaUrl` and **fetches the file itself**, at send time, from the public internet. So the PDF has to be available at a URL independent of the execution that sent the message.
 
-The first version of this system tried to solve that by writing the PDF to a shared Docker volume and having Twilio fetch it via a "read file from disk" webhook. That approach hit a genuine, documented Node.js/Docker-on-Windows bug: `fs.access()`-based writability checks return false negatives on certain bind-mounted and named-volume configurations, even though the underlying write would succeed. Full details and every dead end are in `DEBUGGING_LOG.md`.
+An early version wrote PDFs to a Docker volume. That hit a Node.js/Docker-on-Windows bug (`fs.access()` false negatives on mounted volumes). The fix was to stop storing PDFs: Workflow 2 re-authenticates to Odoo and renders the invoice fresh on every request. No files, no cleanup, no shared state. The cost is one Odoo render per fetch (about 4–5 seconds here).
 
-The fix was to **stop treating PDF generation as a one-time event and start treating it as a live, re-fetchable resource.** Workflow 2 doesn't care what Workflow 1 did — it independently re-authenticates to Odoo and re-renders the PDF fresh, every single time it's called. No shared state, no temp files, no cleanup, no permission edge cases. This is a stateless design and it's a legitimate pattern for exactly this class of problem (any time an external API needs to pull a file your system generates on demand).
+### Signed PDF links (access control)
+
+The PDF endpoint has to be reachable by Twilio, so it is public. Invoice IDs are guessable, so the link itself proves permission:
+
+```
+https://<PUBLIC_BASE_URL>/webhook/invoice-pdf?invoice_id=12&exp=1791441568&token=<hex>
+token = HMAC-SHA256(key = PDF_LINK_SECRET, message = "<invoice_id>.<exp>")
+```
+
+Workflow 2 rejects (HTTP 403, before touching Odoo) a request that has a malformed id, an expired `exp`, or a wrong token. The id must be 1–9 digits, because Odoo's report URL accepts comma-separated ids and would otherwise return several invoices in one PDF. Links last one hour. The token comparison is not constant-time (n8n expressions cannot do that); over a public tunnel this is a theoretical concern only.
+
+`tests/webhook_security.ps1` checks seven cases against the live stack: valid link, no signature, token for another invoice, expired, one wrong character, comma-separated ids, non-numeric id.
+
+### Public exposure
+
+| Hostname | Who uses it | What is reachable |
+|---|---|---|
+| `hooks.<your domain>` | Twilio, Meta | Only `/webhook/invoice-pdf` and `/webhook/whatsapp-webhook`. Everything else (including `/`, `/signin`, `/healthz`) returns 404 from the tunnel itself. |
+| `n8n.<your domain>` | You | The n8n editor, behind a **Cloudflare Access** login (configured in the Cloudflare dashboard, not in this repo). |
+
+The tunnel rules are in `cloudflared/config.example.yml`. Docker publishes Postgres, Odoo and n8n on `127.0.0.1` only.
+
+### Two Odoo authentication methods
+
+JSON-RPC `execute_kw` calls (search, read) authenticate with a `uid` from `login`. Odoo's PDF report engine is only reachable through its web controller (`/report/pdf/...`), which needs a **session cookie**. This project uses each one for the calls it is meant for.
 
 ---
 
@@ -98,148 +105,112 @@ The fix was to **stop treating PDF generation as a one-time event and start trea
 
 | Component | Version | Purpose |
 |---|---|---|
-| **ERP Platform** | Odoo 17.0 (Community) | Source of invoice & customer data |
-| **Automation Engine** | n8n (latest, self-hosted) | Workflow orchestration |
-| **Database** | PostgreSQL 16 | n8n backend + invoice delivery audit log |
-| **Messaging** | Twilio WhatsApp API (Sandbox) | PDF delivery channel |
-| **Tunneling** | Cloudflare Tunnel (named, permanent) | Exposes n8n publicly at a fixed domain — no port forwarding, no public IP |
-| **Containerization** | Docker Compose | All services on a shared bridge network |
-| **API Integration** | Odoo JSON-RPC + session-cookie auth | Two separate Odoo auth flows (see below) |
-
-**Why two different Odoo auth methods in the same system:** JSON-RPC `execute_kw` calls (searching/reading records) use a `uid` from a `login` call. Odoo's PDF report engine, however, only works through its web controller (`/report/pdf/...`), which requires a session cookie, not a `uid`. These are genuinely two separate authentication mechanisms inside Odoo itself — this project uses both, correctly, for the calls each one is actually meant for.
+| ERP | Odoo 17.0 (Community) | Source of invoices and customers |
+| Automation | n8n (self-hosted) | Workflow orchestration |
+| Database | PostgreSQL 16 | Odoo, n8n and the delivery audit log (three databases) |
+| Messaging | Twilio WhatsApp API (sandbox) | PDF delivery |
+| Tunnel | Cloudflare Tunnel (named) | Public HTTPS without port forwarding |
+| Containers | Docker Compose | Postgres, Odoo, n8n, cloudflared |
+| CI | GitHub Actions | Workflow lint, secret scan, fresh-database test |
 
 ---
 
 ## 🚀 Setup
 
-### Prerequisites
-- Docker Desktop (with sufficient drive sharing enabled for bind mounts, if used)
-- A Twilio account with WhatsApp Sandbox enabled, and a recipient number that has joined the sandbox
-- A domain and a Cloudflare account (free tier) for the named tunnel, or your own reverse-proxy equivalent if you're not using Cloudflare
+Full step-by-step guide: **[QUICKSTART.md](QUICKSTART.md)**. In short:
 
-### 1. Clone and configure environment
+1. `cp .env.example .env` and fill it in (generate `PDF_LINK_SECRET` with `openssl rand -hex 32`).
+2. `docker compose up -d` — on a fresh volume this also creates `n8n_db` and `invoice_automation_logs` and loads the schema.
+3. Install Odoo's Invoicing app, grant Billing Administrator, set a **Mobile** number on a test customer.
+4. Create a Cloudflare tunnel with the two hostnames, using `cloudflared/config.example.yml`.
+5. Import both workflows. Activate **Serve Invoice PDFs** first.
+6. Run **Invoice Automation - WhatsApp Delivery** manually and check the audit table.
 
-```bash
-git clone https://github.com/tahatahirbutt-dev/Odoo-Invoice-Automation.git
-cd Odoo-Invoice-Automation
-cp .env.example .env
-```
-
-Edit `.env`:
-```env
-ODOO_USER=admin
-ODOO_PASSWORD=admin
-TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxx
-PUBLIC_BASE_URL=n8n.yourdomain.com
-```
-
-> **Note on `N8N_BLOCK_ENV_ACCESS_IN_NODE`:** this project references `ODOO_USER`, `ODOO_PASSWORD`, and `TWILIO_ACCOUNT_SID` via `{{$env.VAR}}` expressions inside node parameters, rather than hardcoding them into committed workflow JSON. This requires `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` in `docker-compose.yml` (already set). Be aware: n8n has a known cosmetic bug where the expression editor shows a red "access to env vars denied" warning even when the value resolves correctly at execution time — confirmed via n8n's own GitHub issue tracker. Trust the **Execute step** output, not the inline preview.
-
-The Twilio **Auth Token** is *not* stored as an env var — it's stored as an n8n credential (Basic Auth), referenced by the `Send via Twilio` node, which keeps it encrypted at rest and out of the workflow JSON entirely.
-
-### 2. Start the stack
-
-```bash
-docker-compose up -d
-```
-
-This brings up PostgreSQL, Odoo, and n8n on a shared `invoice_network`. Odoo's Invoicing app needs to be installed manually on first run (Settings → Apps → search "Invoicing" → Install), and the admin user needs **Billing Administrator** access rights explicitly set (Settings → Users → Access Rights → Invoicing) — Odoo's UI can visually show a permission as set without it actually committing to the underlying access-control group, so verify this directly if you hit `AccessError` on `account.move`.
-
-### 3. Cloudflare Tunnel
-
-The tunnel runs as its own service inside `docker-compose.yml` (`cloudflared`, reading config from `./.cloudflared`) — it comes up automatically with the rest of the stack in step 2, there's no separate command to run.
-
-To point it at your own domain: authenticate `cloudflared` locally (`cloudflared tunnel login`), create a named tunnel, route it to your domain via DNS, and drop the resulting credentials file into `./.cloudflared/`. Set `PUBLIC_BASE_URL` in `.env` to that domain — this is what `Format WhatsApp Number` uses to build `media_url`, and what n8n itself uses for `N8N_HOST`/`WEBHOOK_URL`.
-
-### 4. Import both workflows into n8n
-
-Import `workflows/Invoice Automation - WhatsApp Delivery.json` and `workflows/Serve Invoice PDFs.json`. Both reference `{{$env.PUBLIC_BASE_URL}}` rather than a hardcoded URL, so no manual editing is needed as long as `.env` is set correctly.
-
-**Activate Workflow 2 first** (toggle "Active" — webhooks only respond when the workflow is saved and active, not just open in the editor), then test Workflow 1.
-
-**Note:** In this repo, Workflow 1 is committed in an *inactive* state. That's deliberate, not a bug — Twilio's free trial caps outbound WhatsApp at 5 messages/day and its Sandbox connection expires periodically, so leaving a 2-hour schedule trigger running continuously against a free-tier account produces silent failures rather than a working pipeline. Activate it once you're on a paid Twilio tier (or have migrated to Meta's Cloud API) for genuinely unattended operation.
-
-### 5. Verify
-
-Run Workflow 1 manually. Check three things:
-- The WhatsApp message actually arrives (confirms Twilio + the webhook fetch worked)
-- Query the audit log:
-```bash
-docker exec -it postgres_invoice_automation psql -U odoo -d invoice_automation_logs \
-  -c "SELECT * FROM invoice_deliveries ORDER BY created_at DESC LIMIT 5;"
-```
-- Confirm both `sent` and `skipped_no_phone` statuses appear correctly depending on test data
+The main workflow is committed inactive. Activate it only on a paid Twilio tier (or after moving to Meta's Cloud API); on the trial tier a 2-hour schedule would hit the daily cap and then fail silently.
 
 ---
 
-## 🐛 Real Bugs Hit While Building This
+## ✅ Testing
 
-Full write-ups are in `DEBUGGING_LOG.md` (build phase) and `DEPLOYMENT_LOG.md` (taking it public — Cloudflare, Meta webhook, and a credential audit). Summary, because this is genuinely useful signal for anyone evaluating this repo:
-
-| Bug | Root Cause | Fix |
+| What | How | Where |
 |---|---|---|
-| Malformed n8n editor URL | `N8N_HOST` and `WEBHOOK_URL` both contained full URLs, got concatenated | `N8N_HOST` must be a bare hostname |
-| `session_id=null` on every request | HTTP node wasn't configured to expose response headers | Enable "Include Response Headers and Status Code" |
-| 403 on PDF fetch despite valid session | Wrong Odoo report technical name (`account.report_invoice` doesn't exist in this instance) | Correct name is `account.report_invoice_with_payments` |
-| `AccessError` on `account.move` despite UI showing correct permissions | Odoo's Access Rights dropdown didn't commit to the real `res.groups` relation | Add the user from the group record directly, not the user form |
-| IF filter broke on empty mobile field | Odoo returns boolean `false` (not `null`/`""`) for empty fields | Explicit normalization: `field !== false ? field : ''` |
-| PDF file wouldn't write to disk | Node.js `fs.access()` writability check gives false negatives on Docker-Windows bind mounts | Abandoned disk writes entirely; switched to stateless webhook re-fetch |
-| GitHub Push Protection blocked commit | Twilio Account SID hardcoded directly in a node's URL field | Replaced with `{{$env.TWILIO_ACCOUNT_SID}}` expression |
-| Two nodes still had hardcoded Odoo `admin`/`admin` after the env-var migration was believed complete | Migration was done node-by-node across sessions; two nodes across two different workflow files were missed | Found via direct audit of exported JSON (not assumed from memory), replaced both with `{{$env.*}}` — see `DEPLOYMENT_LOG.md` |
-| `media_url` still pointed at an ngrok domain after moving to Cloudflare Tunnel | ngrok was still working locally, so nothing broke — the reference just wasn't updated when the infrastructure changed | Replaced with `{{$env.PUBLIC_BASE_URL}}`, tied to the permanent domain |
+| Workflow rules: every branch returns to the loop, the PDF webhook is gated, no `{{ }}` without `=`, no hardcoded credentials, SQL is parameterized, invoice query excludes sent invoices, media URL is signed | `python3 scripts/lint_workflows.py` | CI, every push |
+| Fresh clone: databases and schema are created on an empty volume; the schema accepts the rows the workflow writes | `docker compose up -d postgres` + `psql` | CI, every push |
+| Webhook access control against the live stack | `.\tests\webhook_security.ps1` | Manual (needs the stack) |
+| End to end (Odoo → n8n → Twilio → WhatsApp) | Run the workflow, check the phone and the audit table | Manual |
+
+The lint rules were each checked by re-introducing the original bug and confirming the lint fails.
 
 ---
 
-## 📊 Database Schema
+## 🐛 Real bugs hit while building this
+
+Details, symptoms and root causes: `DEBUGGING_LOG.md` (workflows) and `DEPLOYMENT_LOG.md` (infrastructure).
+
+| Bug | Root cause | Fix |
+|---|---|---|
+| Odoo returns HTTP 200 with the login page instead of an error | Session cookie missing, then (later) the login body was sent unevaluated | Enable response headers; `=` prefix on the expression; tests assert `application/pdf`, not just 200 |
+| `403` on the PDF despite a valid session | Wrong report name | `account.report_invoice_with_payments` |
+| `AccessError` on `account.move` with the right UI setting | Odoo's dropdown did not commit the group | Add the user from the group record |
+| Empty mobile field passed the filter | Odoo uses `false`, not `null` | Normalize `false` to `''` before the check |
+| PDF would not write to disk | `fs.access()` false negatives on Docker-Windows volumes | Stateless re-fetch webhook |
+| **One skipped invoice ended the run** | The skip log node had no connection back to the loop | Every branch returns to the loop |
+| **Every run re-sent every posted invoice** | Query had no memory of what was sent | Exclude invoices with a `sent` row |
+| **PDF endpoint public and unauthenticated** | Sequential invoice ids, no check | HMAC-signed, expiring links; id format check |
+| **Twilio said `queued`, nothing arrived** | Cloudflare Access redirected Twilio's PDF fetch to a login page | Separate public hostname with path-restricted tunnel rules |
+| Audit rows had an empty phone and no Twilio SID | Log node read the Twilio response, not the earlier item | Read from the right node; store plain E.164 |
+
+---
+
+## 📊 Database schema
+
+Database `invoice_automation_logs`, table `invoice_deliveries` (full DDL and a daily summary view in `init.sql`):
+
+| Column | Written by the workflow | Notes |
+|---|---|---|
+| `invoice_id`, `invoice_number` | yes | |
+| `customer_id`, `customer_name` | yes | |
+| `customer_phone` | yes | E.164 without the `whatsapp:` prefix; `''` when skipped |
+| `delivery_status` | yes | `sent` (accepted by Twilio — **not** proof of delivery), `skipped_no_phone`, `failed` |
+| `twilio_sid` | `sent` rows | |
+| `error_message` | `failed` rows | |
+| `sent_at`, `created_at`, `updated_at` | yes | |
+| `attempt_count`, `max_attempts`, `error_code`, `pdf_size`, `response_time_ms` | no | Reserved for retry logic / metrics that are not built |
 
 ```sql
-CREATE TABLE invoice_deliveries (
-  id SERIAL PRIMARY KEY,
-  invoice_id INTEGER NOT NULL,
-  invoice_number VARCHAR(100) NOT NULL,
-  customer_id INTEGER,
-  customer_name VARCHAR(255),
-  customer_phone VARCHAR(20) NOT NULL,
-  delivery_channel VARCHAR(50) DEFAULT 'whatsapp',
-  delivery_status VARCHAR(50) NOT NULL,   -- 'sent' | 'skipped_no_phone'
-  attempt_count INTEGER DEFAULT 1,
-  max_attempts INTEGER DEFAULT 3,          -- reserved for future retry logic
-  sent_at TIMESTAMP,
-  error_message TEXT,
-  error_code VARCHAR(50),
-  twilio_sid VARCHAR(100),                 -- Twilio message SID
-  pdf_size INTEGER,                        -- PDF size in bytes
-  response_time_ms INTEGER,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-The schema has a few columns the current workflow doesn't populate yet (`error_message`, `error_code`, `attempt_count`/`max_attempts` beyond their defaults) — they're there because the table was designed with retry logic in mind, which isn't built yet. `delivery_status` currently only ever holds two values in practice: `sent` or `skipped_no_phone`.
-
-Query recent activity:
-```sql
-SELECT invoice_number, delivery_status, customer_phone, twilio_sid, sent_at
-FROM invoice_deliveries
-ORDER BY created_at DESC
-LIMIT 10;
+SELECT invoice_number, delivery_status, customer_phone, twilio_sid, error_message
+FROM invoice_deliveries ORDER BY created_at DESC LIMIT 10;
 ```
 
 ---
 
-## 🛡️ Security Notes
+## 🛡️ Security notes
 
-- `.env` is gitignored; no credentials are committed
-- Twilio Auth Token lives in n8n's encrypted credential store, never in workflow JSON
-- Twilio Account SID and Odoo credentials are referenced via `{{$env.*}}` expressions rather than literals, so exported workflow JSON contains only variable *names*, never values
-- Current setup uses Odoo's `admin/admin` for local dev — **not committed anywhere**, but also not appropriate for a real deployment; a production version would use a dedicated Odoo API user with only Invoicing-read access, not full admin
+- `.env` is gitignored. The Twilio **Auth Token** is not in `.env` at all; it lives in an n8n credential (encrypted at rest).
+- Workflow JSON references secrets only as `{{$env.NAME}}`, never as values. The lint checks this.
+- **Local-dev defaults are committed, on purpose:** the Postgres password (`odoopass123`) in `docker-compose.yml` and `.env.example`, and Odoo's `admin` / `admin` in the docs. They protect a local stack whose ports are bound to `127.0.0.1`. They must be changed before this runs anywhere else; a production setup would also use a dedicated Odoo API user with Invoicing access only.
+- The public hostname exposes two webhook paths and nothing else; the editor sits behind Cloudflare Access.
+- Anything that appears in a screenshot or an upload should be treated as exposed and rotated (see `DEPLOYMENT_LOG.md`, entry 9).
+
+---
+
+## ⚠️ Known limitations
+
+- **`sent` means Twilio accepted the message, not that WhatsApp delivered it.** A Twilio status callback would close this; not built.
+- **Skipped invoices are logged again on every run** (they stay eligible so they send once a number is added). The audit table grows by one row per skipped invoice per run.
+- **No automatic retry.** A failed or skipped invoice is simply tried again on the next run; only `sent` invoices are excluded.
+- **Laptop-hosted**, so scheduled runs only happen while the machine is awake.
+- **Twilio sandbox / trial limits** apply; sending through Meta's Cloud API is planned but not migrated (the webhook-verification workflow exists; the token in use is temporary).
+- **CI is static plus a database test.** It does not run Odoo or n8n; the live checks are manual.
+- Rendering a PDF takes about 4–5 seconds per request.
 
 ---
 
 ## 📈 What's Next
 
-- **Project #2:** AI Inventory Assistant — n8n AI Agent node + Odoo Inventory JSON-RPC for real-time stock/price Q&A over WhatsApp ([complete](https://github.com/tahatahirbutt-dev/Odoo-AI-Assistant))
-- **Project #3:** Automated Payment Reminders — staged WhatsApp reminders for overdue invoices, reusing most of this stack (Odoo, Postgres, Twilio)
+- **Project #2:** AI Inventory Assistant — n8n AI Agent + Odoo Inventory over WhatsApp ([complete](https://github.com/tahatahirbutt-dev/Odoo-AI-Assistant))
+- **Project #3:** Automated payment reminders — staged WhatsApp reminders for overdue invoices, reusing this stack
+- Twilio status callback so the audit log records real delivery
 
 ---
 
@@ -249,4 +220,4 @@ MIT License © 2026 Taha Tahir Butt
 
 ---
 
-*Maintained by Taha Tahir Butt— Islamabad, Pakistan. Built and debugged against a real Odoo instance, not a tutorial sandbox.*
+*Maintained by Taha Tahir Butt — Islamabad, Pakistan.*

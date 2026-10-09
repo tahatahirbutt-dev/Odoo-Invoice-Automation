@@ -1,5 +1,10 @@
 # Technical Journal — Serve Invoice PDFs Webhook & End-to-End WhatsApp Delivery
 
+> **How to read this file.** Part 1 (July 2026) is the original build: bugs 1–8. Part 2 (October 2026) is
+> what turned up when the working system was re-read and re-tested against the real stack: bugs 9–13.
+> Infrastructure problems (tunnel, Cloudflare Access, compose, fresh-clone startup) are in `DEPLOYMENT_LOG.md`.
+> For the current design, see `README.md`.
+
 This log documents the debugging process behind Project #1's second workflow
 (**Serve Invoice PDFs**) and the final end-to-end integration with the main
 **Invoice Automation — WhatsApp Delivery** workflow. It's included deliberately:
@@ -16,7 +21,11 @@ message-send time and always gets a freshly-rendered PDF, rather than n8n
 needing to host static files anywhere.
 
 Wired this into the main workflow so that Twilio's WhatsApp API fetches the
-invoice PDF live through an ngrok tunnel, completing the full pipeline:
+invoice PDF live through a public tunnel (ngrok at the time; a Cloudflare named
+tunnel since — see `DEPLOYMENT_LOG.md`), completing the July pipeline. This
+diagram is the **original** flow, kept for the history; the current one is in
+`README.md` (the PDF is no longer fetched in this workflow, and every branch
+returns to the loop):
 
 ```
 Schedule Trigger → Odoo Authenticate → Fetch Unpaid/New Invoices
@@ -133,7 +142,7 @@ successful delivery screenshot.
 
 ## Environment / operational notes
 
-- **ngrok free tier**: session must stay running in its own terminal for the
+- **ngrok free tier (historical, replaced by Cloudflare Tunnel)**: session must stay running in its own terminal for the
   tunnel to stay reachable — if the terminal closes or the machine sleeps,
   the tunnel drops even though the static domain persists across restarts.
 - **n8n webhook test vs. production URLs**: the Test URL (`/webhook-test/...`)
@@ -156,3 +165,107 @@ volume, then referencing the file path) was abandoned after persistent
 renders the requested invoice fresh, on every call. This trades a small
 amount of per-request latency for a much simpler, more resilient design with
 no file-system state to manage or go stale.
+
+---
+
+# Part 2 — Hardening (October 2026)
+
+Found by re-reading the exported workflows and running them against the real
+stack, one change at a time. Most of these produced **no error at all**, which
+is the point of writing them down.
+
+### 9. One skipped invoice ended the whole run
+**Symptom:** A customer with no mobile number was logged as `skipped_no_phone`
+and the run stopped there; the remaining invoices were never processed. The
+README said skips don't fail the run — that was only half true.
+**Cause:** `Log Skip to Postgres` had no outgoing connection, and the only
+node connected back to the loop was `Format WhatsApp Number` (the *send* path),
+which also advanced the loop in parallel with the Twilio call. Found by reading
+the connection graph, not by a failure.
+**Fix:** Every branch ends at `Loop Over Invoices`: delivery log, skip log, and
+a new failure log. `Send via Twilio` uses n8n's error output so a failed send
+writes a `failed` row and the run continues. This also fixes the "failure
+produces no audit row" gap listed in `DEPLOYMENT_LOG.md`.
+**Verified:** A run over the demo data (3 Acme invoices with no mobile number,
+1 sent) logged every invoice and finished (execution #662, 2026-10-07). The
+`failed` branch is built but has not been exercised: no send has failed since.
+**Lesson:** A loop is only as robust as its least-connected branch. Check every
+output of every node inside it. `scripts/lint_workflows.py` now fails if any
+branch inside the loop dead-ends.
+
+### 10. Every run re-sent every posted invoice
+**Symptom:** None. Found while reading the invoice query.
+**Cause:** The query was `state = posted` with no memory of what had already
+been sent, although the workflow's own note said "newly posted invoices". It
+had gone unnoticed because the workflow had only ever been run by hand, and
+the Twilio trial cap (5/day) would have hidden it anyway. Activated on a paid
+tier it would have re-sent every invoice to every customer every 2 hours.
+**Fix:** A `Get Sent Invoice IDs` Postgres node reads the ids that have a
+`sent` row, and the Odoo domain gets `["id", "not in", [...]]`.
+**Verified:** On the next run `sent_ids` held the previously sent invoice and
+the split step produced 4 items out of 5 posted invoices.
+**Lesson:** "Automation that runs on a schedule" needs an idempotency story
+before it needs anything else. The audit table is now doing double duty as the
+memory. If logging fails after a successful send, that invoice would be sent
+again; that trade-off is accepted and documented.
+
+### 11. The PDF webhook was public and unauthenticated
+**Symptom:** None. `GET /webhook/invoice-pdf?invoice_id=N` returned that
+invoice for anyone who asked, and Twilio needs the URL to be public, so it
+could not simply be closed.
+**Cause:** Insecure direct object reference: guessable ids and no proof of
+permission. Worse, `invoice_id` went into Odoo's report URL unvalidated, and
+that URL accepts comma-separated ids, so one request could likely return
+several invoices (inferred from how the report controller works; not
+demonstrated against this instance).
+**Fix:** Links are signed. The main workflow adds `exp` (now + 1 hour) and
+`token = HMAC-SHA256(PDF_LINK_SECRET, "<invoice_id>.<exp>")`. The webhook
+workflow recomputes the token and requires: id is 1–9 digits, `exp` is in the
+future, token matches. Anything else gets a 403 before Odoo is contacted.
+**Verified** (locally and through the public hostname): valid link → `200
+application/pdf`; no signature, a token for another invoice, an expired link,
+and a comma-separated id signed with a valid token → all `403`. These are now
+`tests/webhook_security.ps1`.
+**Known limit:** the token comparison is not constant-time (n8n expressions
+cannot do that); acceptable over a public tunnel, noted in the README.
+**Lesson:** If a public URL has to exist, make the URL carry its own
+authorization, and validate the shape of every input that reaches a downstream
+system.
+
+### 12. Odoo login sent as literal text — the "PDF" was a web page, HTTP 200
+**Symptom:** A correctly signed request returned `200`, but the saved
+`test.pdf` would not open and began with `<!DOCTYPE html>`.
+**Cause:** In `Get Odoo Session` the JSON body started with `{`, not `=`, so
+n8n treated it as plain text and sent the characters `{{$env.ODOO_USER}}` as
+the login. Odoo rejected the login, issued an anonymous cookie anyway, and the
+PDF request was redirected to the login page — the same silent failure as bug
+#2. The earlier migration from literal credentials to `{{$env.*}}` (see
+`DEPLOYMENT_LOG.md`, entry 12) was checked by reading the pushed file, not by
+running the workflow, so the node looked right and was never evaluated.
+**Fix:** `=` prefix on the body. Test cases now assert `Content-Type:
+application/pdf`, not just the status code, and the lint fails on any field
+that contains `{{ }}` without a leading `=`.
+**Lesson:** A status code is not a result. Assert on the content, and verify a
+config change by executing it, not by reading it.
+
+### 13. Audit rows lost the phone and SID — and hid a column overflow
+**Symptom:** `sent` rows had an empty `customer_phone` and a NULL
+`twilio_sid`.
+**Cause:** `Log Delivery to Postgres` read `whatsapp_to` from `$json`, but at
+that point `$json` is Twilio's response, which has no such field, so the
+expression fell back to `''`. The empty value was also hiding a second bug:
+`customer_phone` is `VARCHAR(20)` and `whatsapp:+923001234567` is 22
+characters, so fixing the first bug naively would have made every insert fail.
+**Fix:** The log stores plain E.164 (`+923001234567`) taken from the format
+node, `twilio_sid` from Twilio's `sid`, and now also `customer_id` and
+`customer_name`. All three logging nodes use parameterized queries
+(`$1, $2, …`) instead of string interpolation.
+**Verified:** A `sent` row with the real number and a Twilio SID. CI inserts
+all three row shapes, including a name with apostrophes, and asserts that the
+prefixed form is rejected (`value too long for type character varying(20)`).
+**Lesson:** When a field is always empty, find out why before filling it —
+the emptiness may be covering for something else.
+
+### Related: Twilio said `queued`, nothing arrived
+Not a workflow bug. Cloudflare Access was redirecting Twilio's PDF fetch to a
+login page. See `DEPLOYMENT_LOG.md`, entry 13.

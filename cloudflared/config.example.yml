@@ -1,0 +1,27 @@
+# Sanitized copy of .cloudflared/config.yml (the real one is gitignored together with the credentials JSON).
+# Copy to .cloudflared/config.yml, then replace the placeholders.
+#
+#   cloudflared tunnel login
+#   cloudflared tunnel create invoice-automation        # prints the tunnel ID and writes <ID>.json
+#   cloudflared tunnel route dns invoice-automation hooks.example.com
+#   cloudflared tunnel route dns invoice-automation n8n.example.com
+#
+# Check the rules BEFORE restarting the tunnel (prints which rule a URL matches):
+#   docker compose run --rm --no-deps cloudflared tunnel ingress validate
+#   docker compose run --rm --no-deps cloudflared tunnel ingress rule https://hooks.example.com/webhook/invoice-pdf   # -> rule #0
+#   docker compose run --rm --no-deps cloudflared tunnel ingress rule https://hooks.example.com/signin                # -> http_status:404
+
+tunnel: <TUNNEL_ID>
+credentials-file: /etc/cloudflared/<TUNNEL_ID>.json
+
+ingress:
+  # Public host: ONLY the paths external services must reach. `path` is a regex matched against the
+  # URL path (e.g. /webhook/invoice-pdf), not the full URL. Keep it in sync with the webhook paths in n8n.
+  - hostname: hooks.example.com
+    path: ^/webhook/(invoice-pdf|whatsapp-webhook)$
+    service: http://n8n:5678
+  # Editor host: protect it with a Cloudflare Access application (configured in the dashboard, not here).
+  - hostname: n8n.example.com
+    service: http://n8n:5678
+  # Anything else, including every other path on the public host, gets a 404.
+  - service: http_status:404

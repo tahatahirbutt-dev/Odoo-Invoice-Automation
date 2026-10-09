@@ -19,11 +19,98 @@
     },
     {
       "parameters": {
+        "action": "hmac",
+        "type": "SHA256",
+        "value": "={{ $json.query.invoice_id }}.{{ $json.query.exp }}",
+        "dataPropertyName": "expected_token",
+        "secret": "={{ $env.PDF_LINK_SECRET }}",
+        "encoding": "hex"
+      },
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [
+        208,
+        0
+      ],
+      "id": "2e7390a5-e270-4f47-8602-3fb81778bf0b",
+      "name": "Compute Expected Token"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "630eb610-bb5d-457e-b4d9-4a6f08b66ade",
+              "leftValue": "={{ $json.query.invoice_id }}",
+              "rightValue": "^\\d{1,9}$",
+              "operator": {
+                "type": "string",
+                "operation": "regex"
+              }
+            },
+            {
+              "id": "81f9731a-a269-4dca-953b-1c192d698fab",
+              "leftValue": "={{ Number($json.query.exp) }}",
+              "rightValue": "={{ Math.floor(Date.now() / 1000) }}",
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            },
+            {
+              "id": "4dd96430-6104-49f7-909a-775d70ae0c9f",
+              "leftValue": "={{ $json.query.token }}",
+              "rightValue": "={{ $json.expected_token }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        416,
+        0
+      ],
+      "id": "a94a6a2f-2db8-4e52-bd20-264f5740c814",
+      "name": "Link Valid?"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "Forbidden",
+        "options": {
+          "responseCode": 403
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        624,
+        192
+      ],
+      "id": "4a164c40-eca9-4648-9a7b-dbe26d1f1712",
+      "name": "Reject 403"
+    },
+    {
+      "parameters": {
         "method": "POST",
         "url": "http://odoo:8069/web/session/authenticate",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "{\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"db\": \"odoo\",\n    \"login\": \"{{$env.ODOO_USER}}\",\n    \"password\": \"{{$env.ODOO_PASSWORD}}\"\n  }\n}",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"db\": \"odoo\",\n    \"login\": \"{{$env.ODOO_USER}}\",\n    \"password\": \"{{$env.ODOO_PASSWORD}}\"\n  }\n}",
         "options": {
           "response": {
             "response": {
@@ -35,10 +122,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        208,
-        0
+        624,
+        -96
       ],
-      "id": "813c0cc1-e460-48ec-ad7d-ec62a2430c6f",
+      "id": "8c0e17e9-c744-46c4-9160-62c013f3803b",
       "name": "Get Odoo Session"
     },
     {
@@ -46,7 +133,7 @@
         "assignments": {
           "assignments": [
             {
-              "id": "54aa6ee5-43cf-4216-87de-e4118de7436b",
+              "id": "877277db-0eef-4a84-8245-278e9a8d677c",
               "name": "session_cookie",
               "value": "={{$json.headers['set-cookie'][0].split(';')[0]}}",
               "type": "string"
@@ -58,10 +145,10 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        384,
-        0
+        832,
+        -96
       ],
-      "id": "1670e78a-d469-431c-8f8f-49f774f35b96",
+      "id": "656bc949-0329-4776-b4d8-2927961264ff",
       "name": "Extract Session ID"
     },
     {
@@ -88,10 +175,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        592,
-        0
+        1040,
+        -96
       ],
-      "id": "df0b3cdb-1ff8-4430-ad87-7baebba2b921",
+      "id": "f8d6970d-2a46-4476-b8c3-8c484b874e8a",
       "name": "Fetch Invoice PDF"
     },
     {
@@ -103,40 +190,41 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
       "position": [
-        800,
-        0
+        1248,
+        -96
       ],
-      "id": "49e3588c-5984-4696-9b0d-38b641b197b4",
+      "id": "e4489605-11a8-492b-a6c0-70a6f83b4dd4",
       "name": "Respond to Webhook"
     },
     {
       "parameters": {
-        "content": "## Serve Invoice PDFs\nBuilt: 2026-07-08 | Stateless webhook, no file storage\n\nTwilio's WhatsApp API fetches media from a URL rather than\naccepting attachments directly. This workflow exists solely to\nanswer that fetch: re-authenticates to Odoo and re-renders the\nrequested invoice fresh, every single call.\n\nMust be toggled **Active** (not just open) for the webhook to\nrespond — Test URL only fires once per manual click.",
-        "height": 336,
-        "width": 1392
+        "content": "## Serve Invoice PDFs\nBuilt: 2026-07-08 | Revised: 2026-10-07 (retest pending) | Stateless webhook, no file storage\n\nTwilio's WhatsApp API fetches media from a URL rather than accepting attachments directly. This workflow answers that fetch: it re-authenticates to Odoo and re-renders the requested invoice fresh, every call.\n\n**Access control:** the URL must carry `invoice_id`, `exp` (unix seconds) and `token` = HMAC-SHA256(\"invoice_id.exp\", PDF_LINK_SECRET). Anything else - bad id format, expired link, wrong token - gets a 403 and never reaches Odoo. The main workflow signs the links.\n\nMust be toggled **Active** (not just open) for the webhook to respond.",
+        "height": 380,
+        "width": 1600
       },
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        -880,
-        -576
+        -304,
+        -480
       ],
-      "id": "122ac91f-3109-479d-8229-7f58842f6ebc",
+      "id": "9380696f-6631-4e85-b3b1-63d3d042a4eb",
       "name": "Sticky Note"
     },
     {
       "parameters": {
-        "content": "### Note on Odoo auth\nThis uses session-cookie auth (web login), NOT the same as the\nuid/JSON-RPC auth used in the main workflow's search_read calls.\nOdoo genuinely has two separate auth systems — this one is\nrequired specifically for the PDF report engine.",
-        "height": 464,
+        "content": "### Note on Odoo auth\nThis uses session-cookie auth (web login), NOT the same as the uid/JSON-RPC auth used in the main workflow's search_read calls. Odoo genuinely has two separate auth systems - this one is required specifically for the PDF report engine.",
+        "height": 220,
+        "width": 420,
         "color": "#FBDC0E"
       },
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
         144,
-        208
+        304
       ],
-      "id": "3553ee78-7bb0-416e-aa84-cee94cfa39aa",
+      "id": "8c6b292f-614b-4938-8fd5-0314e24d068a",
       "name": "Sticky Note1"
     }
   ],
@@ -146,7 +234,36 @@
       "main": [
         [
           {
+            "node": "Compute Expected Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Expected Token": {
+      "main": [
+        [
+          {
+            "node": "Link Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Link Valid?": {
+      "main": [
+        [
+          {
             "node": "Get Odoo Session",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject 403",
             "type": "main",
             "index": 0
           }
@@ -193,7 +310,7 @@
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "e2c4a1d4-be9e-40cd-b9ba-36a77e84f3d8",
+  "versionId": "e35b6a81-5276-4057-b3b7-5a88559fe8de",
   "meta": {
     "instanceId": "3ba22a21b4f43fda87a6406853dd8a83e9b892ed400089a9e6f03bb16f4fb9a6"
   },

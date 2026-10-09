@@ -1,19 +1,12 @@
--- PostgreSQL Init Script for Invoice Automation Audit Logs
+-- Audit-log schema for Invoice Automation (database: invoice_automation_logs).
 --
--- IMPORTANT: PostgreSQL does not support `CREATE DATABASE IF NOT EXISTS`
--- (that's MySQL syntax) and CREATE DATABASE cannot run inside a multi-statement
--- transaction the way this file is executed. The `invoice_automation_logs` and
--- `n8n_db` databases must exist BEFORE this script runs. In this project they
--- were created manually:
---
---   docker exec -it postgres_invoice_automation createdb -U odoo invoice_automation_logs
---   docker exec -it postgres_invoice_automation createdb -U odoo n8n_db
---
--- (`odoo` — the default database — is auto-created by the official Postgres
--- image because POSTGRES_USER=odoo in docker-compose.yml.)
---
--- This script only builds the schema INSIDE invoice_automation_logs. Run it with:
+-- On a fresh clone this file is loaded automatically by docker/initdb/00-databases-and-schema.sql
+-- (first start of an empty volume only). To apply it to a stack that is already running:
 --   docker exec -i postgres_invoice_automation psql -U odoo -d invoice_automation_logs < init.sql
+-- It is idempotent (IF NOT EXISTS / OR REPLACE), so re-running it is safe.
+--
+-- This file does NOT create databases: CREATE DATABASE cannot run inside this script's connection
+-- and has no IF NOT EXISTS in PostgreSQL. That lives in docker/initdb/00-databases-and-schema.sql.
 
 -- Create invoice_deliveries table for WhatsApp delivery tracking
 CREATE TABLE IF NOT EXISTS invoice_deliveries (
@@ -22,15 +15,15 @@ CREATE TABLE IF NOT EXISTS invoice_deliveries (
   invoice_number VARCHAR(100) NOT NULL,
   customer_id INTEGER,
   customer_name VARCHAR(255),
-  customer_phone VARCHAR(20) NOT NULL,
+  customer_phone VARCHAR(20) NOT NULL, -- E.164 without the 'whatsapp:' prefix (max 16 chars); '' when skipped
   delivery_channel VARCHAR(50) DEFAULT 'whatsapp', -- currently always 'whatsapp'
-  delivery_status VARCHAR(50) NOT NULL, -- 'sent' | 'skipped_no_phone' (only two values the workflow currently writes; schema allows more for future retry logic)
+  delivery_status VARCHAR(50) NOT NULL, -- 'sent' (accepted by Twilio, NOT proof of delivery) | 'skipped_no_phone' | 'failed'
   attempt_count INTEGER DEFAULT 1,
-  max_attempts INTEGER DEFAULT 3, -- reserved for future retry logic, not yet implemented
+  max_attempts INTEGER DEFAULT 3, -- reserved for future retry logic, not implemented
   sent_at TIMESTAMP,
   error_message TEXT,
   error_code VARCHAR(50),
-  twilio_sid VARCHAR(100), -- Twilio message SID for reference
+  twilio_sid VARCHAR(100), -- Twilio message SID (written for 'sent' rows)
   pdf_size INTEGER, -- Size of PDF in bytes
   response_time_ms INTEGER, -- API response time in milliseconds
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -64,7 +57,7 @@ BEFORE UPDATE ON invoice_deliveries
 FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
--- Success rate view (works today, since delivery_status only ever holds 'sent' / 'skipped_no_phone')
+-- Daily summary view. success_percentage = sent / all rows that day (skips and failures count against it).
 CREATE OR REPLACE VIEW invoice_delivery_success_rate AS
 SELECT
   DATE(created_at) as delivery_date,
@@ -74,7 +67,8 @@ SELECT
   ROUND(
     100.0 * SUM(CASE WHEN delivery_status = 'sent' THEN 1 ELSE 0 END) / COUNT(*),
     2
-  ) as success_percentage
+  ) as success_percentage,
+  SUM(CASE WHEN delivery_status = 'failed' THEN 1 ELSE 0 END) as failed_sends
 FROM invoice_deliveries
 GROUP BY DATE(created_at)
 ORDER BY delivery_date DESC;

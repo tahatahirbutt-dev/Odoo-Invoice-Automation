@@ -1,4 +1,4 @@
-name: Test & Build
+name: CI
 
 on:
   push:
@@ -7,95 +7,80 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  # Fast static checks. No services needed.
+  static:
     runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: odoo
-          POSTGRES_PASSWORD: odoopass123
-          POSTGRES_DB: test_db
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '22'
-
-      - name: Test environment variables
+      - name: JSON files are valid (fails the build if not)
         run: |
-          if [ ! -f .env.example ]; then
-            echo "Error: .env.example not found!"
-            exit 1
-          fi
-          echo "✓ .env.example exists"
-
-      - name: Validate Docker Compose
-        run: docker compose config > /dev/null
-
-      - name: Check documentation
-        run: |
-          if [ ! -f README.md ]; then exit 1; fi
-          if [ ! -f QUICKSTART.md ]; then exit 1; fi
-          if [ ! -f DEPLOYMENT.md ]; then exit 1; fi
-          echo "✓ All documentation files present"
-
-      - name: Validate JSON files
-        run: |
-          find . -name "*.json" -not -path "./node_modules/*" | while read f; do
-            jq empty "$f" 2>/dev/null || echo "Invalid JSON: $f"
+          for f in workflows/*.json package.json; do
+            jq empty "$f" || { echo "Invalid JSON: $f"; exit 1; }
           done
 
-  security-scan:
+      - name: Workflow rules (loop returns, webhook gate, expressions, SQL, credentials)
+        run: python3 scripts/lint_workflows.py
+
+      - name: No real secrets or .env in tracked files
+        run: |
+          if [ -n "$(git ls-files .env .cloudflared)" ]; then
+            echo "A secrets file is tracked by git"; git ls-files .env .cloudflared; exit 1
+          fi
+          grep -qx '\.env' .gitignore || { echo ".env is not in .gitignore"; exit 1; }
+          if git grep -nE 'AC[0-9a-f]{32}|EAA[A-Za-z0-9]{40,}|ghp_[A-Za-z0-9]{30,}' -- . ':!.github'; then
+            echo "Something that looks like a real Twilio SID / Meta token / GitHub token is committed"; exit 1
+          fi
+
+      - name: Docs exist and REPOSITORY_GUIDE only lists files that exist
+        run: |
+          for f in README.md QUICKSTART.md DEPLOYMENT.md DEPLOYMENT_LOG.md DEBUGGING_LOG.md REPOSITORY_GUIDE.md LICENSE; do
+            [ -f "$f" ] || { echo "Missing $f"; exit 1; }
+          done
+          grep -oE '^- `[^`]+`' REPOSITORY_GUIDE.md | sed -E 's/^- `//; s/`$//' | while IFS= read -r f; do
+            [ -e "$f" ] || { echo "REPOSITORY_GUIDE.md lists a file that does not exist: $f"; exit 1; }
+          done
+
+  # Brings up only PostgreSQL, exactly as a fresh clone would, and checks the init flow and the schema.
+  database:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Check for secrets
+      - name: Compose file is valid with the documented .env.example
         run: |
-          if grep -r "password\|secret\|key" .env 2>/dev/null; then
-            echo "Warning: Potential secrets in .env"
-          fi
-          if grep -r "ODOO_PASSWORD\|TWILIO_AUTH_TOKEN" --include="*.py" --include="*.js" .; then
-            echo "Warning: Hardcoded credentials detected!"
-            exit 1
-          fi
+          cp .env.example .env
+          docker compose config -q
 
-      - name: Verify .gitignore
+      - name: Fresh PostgreSQL volume creates both databases and the audit table
         run: |
-          if ! grep -q "^\.env$" .gitignore; then
-            echo "Error: .env not in .gitignore!"
-            exit 1
+          docker compose up -d postgres
+          for i in $(seq 1 40); do
+            if docker compose exec -T postgres psql -U odoo -d invoice_automation_logs -tAc 'select 1' >/dev/null 2>&1; then ok=1; break; fi
+            sleep 3
+          done
+          [ "${ok:-0}" = 1 ] || { docker compose logs postgres; echo "invoice_automation_logs was never created"; exit 1; }
+          docker compose exec -T postgres psql -U odoo -d n8n_db -tAc 'select 1'
+          docker compose exec -T postgres psql -U odoo -d invoice_automation_logs -tAc "select to_regclass('public.invoice_deliveries')" | grep -q invoice_deliveries
+
+      - name: Schema accepts the three row shapes the workflow writes
+        run: |
+          docker compose exec -T postgres psql -U odoo -d invoice_automation_logs -v ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO invoice_deliveries (invoice_id, invoice_number, customer_id, customer_name, customer_phone, delivery_status, twilio_sid, sent_at)
+          VALUES (1, 'INV/2026/00002', 7, 'O''Neil''s Traders', '+923001234567', 'sent', 'MM00000000000000000000000000000000', NOW());
+          INSERT INTO invoice_deliveries (invoice_id, invoice_number, customer_id, customer_name, customer_phone, delivery_status, sent_at)
+          VALUES (2, 'INV/2026/00003', 8, 'Acme Corporation', '', 'skipped_no_phone', NOW());
+          INSERT INTO invoice_deliveries (invoice_id, invoice_number, customer_id, customer_name, customer_phone, delivery_status, error_message)
+          VALUES (3, 'INV/2026/00004', 9, 'Azure Interior', '+923001234567', 'failed', 'Twilio: media fetch failed');
+          SQL
+
+      - name: A 'whatsapp:+...' value must NOT fit customer_phone (the workflow stores plain E.164)
+        run: |
+          if docker compose exec -T postgres psql -U odoo -d invoice_automation_logs -v ON_ERROR_STOP=1 \
+               -c "INSERT INTO invoice_deliveries (invoice_id, invoice_number, customer_phone, delivery_status) VALUES (9, 'x', 'whatsapp:+923001234567', 'sent')"; then
+            echo "Expected a 'value too long' error"; exit 1
           fi
 
-  docker-build:
-    runs-on: ubuntu-latest
-    needs: test
-    if: github.ref == 'refs/heads/main'
-
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-
-      - name: Build Docker images
-        run: docker compose build --no-cache
-
-      - name: Validate containers start
-        run: |
-          docker compose up -d
-          sleep 30
-          docker compose ps
-          docker compose down
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
