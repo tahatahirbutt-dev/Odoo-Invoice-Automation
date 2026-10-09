@@ -16,6 +16,7 @@
 |---|---|
 | **What is verified** | On 2026-10-08 the current workflows delivered a real invoice PDF to a real WhatsApp number through the Twilio sandbox, via the public Cloudflare tunnel, with the audit row written. Earlier fixes were verified step by step (see `DEBUGGING_LOG.md`). |
 | **What it is not** | Not a production deployment. It runs in Docker on a laptop (only while the machine is awake), messages go through a Twilio **trial sandbox** (5 messages/day, recipients must join the sandbox), and the main workflow is committed **inactive** for that reason. |
+| **Path to production** | Planned for when a customer needs it and pays for hosting. It already runs as containers behind a tunnel, so the remaining work is mostly configuration: a server, a paid messaging tier (or Meta's Cloud API), a dedicated Odoo API user, real credentials and backups. The list is in `DEPLOYMENT.md`. |
 | **Not yet exercised** | The failed-send branch (built, but no failure has occurred since it was added) and an apostrophe in a customer name (the schema accepts it — checked in CI — but the n8n parameterized insert has not been run with one). |
 
 This is a portfolio project built and debugged against a real Odoo instance. The two logs record the bugs honestly, including the ones found after the first version "worked".
