@@ -43,30 +43,9 @@ This is a portfolio project built and debugged against a real Odoo instance. The
 
 Two independent n8n workflows:
 
-```
-WORKFLOW 1: Invoice Automation - WhatsApp Delivery (schedule, every 2 h)
+![System architecture: Workflow 1 (scheduled delivery) and Workflow 2 (signed PDF webhook)](docs/images/architecture.png)
 
- Schedule → Get Sent Invoice IDs (Postgres) → Odoo Authenticate → Fetch Unsent Invoices
-   → Split Invoice Array → Loop Over Invoices (batch size 1) ◄─────────────────────────┐
-        → Get Customer Contact → Filter - Has Mobile Number                             │
-              │ yes                               │ no                                  │
-              ▼                                   ▼                                     │
-        Format WhatsApp Number              Skipped → Log Skip to Postgres ─────────────┤
-              → Sign PDF Link (HMAC)                                                    │
-              → Build Media URL                                                         │
-              → Send via Twilio ──ok──→ Log Delivery to Postgres ───────────────────────┤
-                       └──error──→ Log Failure to Postgres ─────────────────────────────┘
-
-WORKFLOW 2: Serve Invoice PDFs (webhook GET /webhook/invoice-pdf?invoice_id&exp&token)
-
- Webhook → Compute Expected Token (HMAC) → Link Valid?
-              │ yes: id is 1-9 digits, not expired, token matches
-              ▼
-        Get Odoo Session → Extract Session ID → Fetch Invoice PDF → Respond (PDF)
-              │ no
-              ▼
-        Reject 403   (Odoo is never contacted)
-```
+*Left: Workflow 1, the scheduled delivery loop. Right: Workflow 2, the signed-link PDF webhook. Bottom: the stack.*
 
 ### Why two workflows
 
@@ -99,6 +78,36 @@ The tunnel rules are in `cloudflared/config.example.yml`. Docker publishes Postg
 ### Two Odoo authentication methods
 
 JSON-RPC `execute_kw` calls (search, read) authenticate with a `uid` from `login`. Odoo's PDF report engine is only reachable through its web controller (`/report/pdf/...`), which needs a **session cookie**. This project uses each one for the calls it is meant for.
+
+---
+
+## 📸 Proof of operation
+
+> **Which version is shown.** Figures 1–3 are n8n canvas screenshots of the **first working build** (July 2026). They predate the signed links, the sent-invoice check and the failure branch, so those nodes are not visible there. Figure 4 (Twilio log) is from 2026-07-06 and Figure 5 (the WhatsApp message) is the end result on the phone. The current design is the diagram in the Architecture section above.
+
+### Workflows (n8n canvas, first build)
+
+**Figure 1 – Workflow 1, delivery side:** PDF and contact are merged, filtered on mobile number, then sent via Twilio and logged. The no-number branch is logged separately.
+
+![Figure 1: Workflow 1, merge, mobile filter, Twilio send and Postgres logging](docs/images/workflow1-delivery.png)
+
+**Figure 2 – Workflow 1, intake side:** schedule trigger, Odoo login, invoice fetch, then a one-at-a-time loop that fetches each PDF.
+
+![Figure 2: Workflow 1, schedule, Odoo authenticate, fetch invoices, loop](docs/images/workflow1-intake.png)
+
+**Figure 3 – Workflow 2 (Serve Invoice PDFs), published:** webhook, Odoo session, PDF render, response. This is the endpoint Twilio fetches the PDF from.
+
+![Figure 3: Workflow 2, webhook to Odoo session to PDF response](docs/images/workflow2-serve-pdf.png)
+
+### Delivery evidence
+
+**Figure 4 – Twilio message log:** outgoing WhatsApp API messages to the sandbox number, status **Read**, each with a media attachment.
+
+![Figure 4: Twilio Messaging log showing outgoing messages with status Read](docs/images/twilio-message-log.png)
+
+**Figure 5 – WhatsApp on the recipient's phone:** the sandbox join confirmation, then the invoice PDF (38 kB) with the message "Your invoice is ready. Please find it attached."
+
+![Figure 5: WhatsApp showing the sandbox join and the delivered invoice PDF](docs/images/whatsapp-delivered-invoice.png)
 
 ---
 
