@@ -303,6 +303,44 @@ written for those, and no status callback exists to correct it.
 Testing it on purpose took 20 minutes and found three gaps that no amount of
 reading the workflow showed.
 
+### 15. Local-format phone numbers were sent to Twilio unchecked
+
+**Symptom:** Found while testing entry 14. A customer Mobile of `0300 1234567`
+became `+03001234567` and Twilio rejected it (`21211`, not a valid phone number).
+
+**Cause:** `Format WhatsApp Number` stripped every non-digit from Odoo's Mobile
+field and put `+` in front. That is only correct when the number already
+includes its country code. A local number with a leading `0` produced an
+invalid number, and nothing checked it before the send.
+
+**Fix:** Two new nodes and one new log branch before the send. `Normalize Phone`
+keeps `+…` as is, turns `00…` into `+…`, and replaces a single leading `0` with
+`+` and `DEFAULT_COUNTRY_CODE` (an n8n environment variable; unset means a
+leading-zero number is rejected rather than guessed). Anything else is treated
+as already containing a country code. The result must match E.164
+(`^\+[1-9]\d{7,14}$`), otherwise it is empty. `Valid Number?` sends empty
+results to `Log Invalid Phone to Postgres`, which writes
+`skipped_invalid_phone` with the raw value (first 100 characters) in
+`error_message` and returns to the loop. `customer_phone` stays empty on that
+row because the column is `VARCHAR(20)`; a long bad value there would make the
+insert fail and stop the run.
+
+**Verified:** The expression was run against 15 cases offline (local, `+`, `00`,
+bracketed, UAE, unset country code, too short, letters, empty, `false`). Live
+on the stack: Mobile `12345` produced a `skipped_invalid_phone` row (id 38,
+`Invalid mobile: 12345`) with no Twilio call. Mobile `0319 0704800` produced a
+`sent` row (id 42) for `+923190704800`, and the PDF arrived on the phone.
+
+**Known gaps:** A number with no leading `0` and no `+` is assumed to include
+its country code, so a UAE `501234567` becomes `+501234567`, which is wrong and
+valid-looking. `skipped_invalid_phone` rows are re-logged on every run, like
+`skipped_no_phone`. The failed-send retry cap (entry 14, gap 2) is not built.
+The daily summary view has no column for the new status.
+
+**Lesson:** Validate input before the call you cannot take back. Twilio's
+rejection was a fine error message, but by then the invoice had already been
+queued for retry every two hours.
+
 
 ### Related: Twilio said `queued`, nothing arrived
 Not a workflow bug. Cloudflare Access was redirecting Twilio's PDF fetch to a

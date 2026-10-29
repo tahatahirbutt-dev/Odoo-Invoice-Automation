@@ -164,7 +164,7 @@
             {
               "id": "4d2f820b-c52a-4b1c-86b5-51496fffd84b",
               "name": "whatsapp_to",
-              "value": "=whatsapp:+{{$json.result[0].mobile.replace(/[^0-9]/g, '')}}",
+              "value": "=whatsapp:{{ $json.phone_e164 }}",
               "type": "string"
             },
             {
@@ -186,7 +186,7 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        1696,
+        2112,
         -144
       ],
       "id": "c31b96b2-b37d-45b6-89cb-c1e7d648342a",
@@ -204,7 +204,7 @@
       "type": "n8n-nodes-base.crypto",
       "typeVersion": 1,
       "position": [
-        1904,
+        2320,
         -144
       ],
       "id": "04b43c8f-de22-45ed-a69c-33e6981104df",
@@ -228,7 +228,7 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        2112,
+        2528,
         -144
       ],
       "id": "680b85ce-4a71-4237-9e05-3427c38e8ff7",
@@ -267,7 +267,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        2320,
+        2736,
         -144
       ],
       "id": "e069b378-c1ad-4215-b6ce-b8bdc2ead291",
@@ -291,7 +291,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
       "position": [
-        2560,
+        2976,
         -240
       ],
       "id": "3117981f-04ba-4df8-8bbc-eb21a778633d",
@@ -314,7 +314,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
       "position": [
-        2560,
+        2976,
         -48
       ],
       "id": "6d8ade45-8fb0-4d83-bfab-b76ef0f0c0a5",
@@ -393,7 +393,7 @@
     },
     {
       "parameters": {
-        "content": "### For future reference\n- delivery_status now writes 'sent', 'skipped_no_phone' or 'failed'\n- 'sent' means Twilio accepted the message (status queued), not that WhatsApp delivered it. A Twilio status callback would close that gap.\n- No automatic retry: skipped and failed invoices are simply picked up again on the next scheduled run (only 'sent' invoices are excluded).",
+        "content": "### For future reference\n- delivery_status now writes 'sent', 'skipped_no_phone', 'skipped_invalid_phone' or 'failed'\n- 'sent' means Twilio accepted the message (status queued), not that WhatsApp delivered it. A Twilio status callback would close that gap.\n- No automatic retry: skipped and failed invoices are simply picked up again on the next scheduled run (only 'sent' invoices are excluded).",
         "height": 304,
         "width": 420,
         "color": "#90BBEA"
@@ -401,11 +401,93 @@
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        2800,
+        3216,
         -336
       ],
       "id": "317ad046-2d3f-4ba1-860c-aafde2842e09",
       "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "feb3839d-aa30-468b-98e4-b2c1d02dbc79",
+              "name": "phone_e164",
+              "value": "={{ (() => {\n  const raw = String($json.result[0].mobile || '').trim();\n  const cc = String($env.DEFAULT_COUNTRY_CODE || '').replace(/\\D/g, '');\n  const d = raw.replace(/[^\\d+]/g, '');\n  let out;\n  if (d.startsWith('+')) out = '+' + d.slice(1).replace(/\\D/g, '');\n  else if (d.startsWith('00')) out = '+' + d.slice(2);\n  else if (d.startsWith('0') && cc) out = '+' + cc + d.slice(1);\n  else out = d ? '+' + d : '';\n  return /^\\+[1-9]\\d{7,14}$/.test(out) ? out : '';\n})() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1696,
+        -144
+      ],
+      "id": "dd621564-4e1b-457b-bc44-563f3cc8529e",
+      "name": "Normalize Phone"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "7808dfc9-eed1-49ca-a32d-425ef836a1db",
+              "leftValue": "={{ $json.phone_e164 }}",
+              "rightValue": "is not empty",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1904,
+        -144
+      ],
+      "id": "7782d46c-112c-44dd-9d30-3b70149c79d0",
+      "name": "Valid Number?"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO invoice_deliveries\n  (invoice_id, invoice_number, customer_id, customer_name, customer_phone, delivery_status, error_message)\nVALUES ($1, $2, $3, $4, '', 'skipped_invalid_phone', $5);",
+        "options": {
+          "queryReplacement": "={{ [\n  $('Loop Over Invoices').item.json.id,\n  $('Loop Over Invoices').item.json.name,\n  $('Loop Over Invoices').item.json.partner_id[0],\n  $('Loop Over Invoices').item.json.partner_id[1],\n  'Invalid mobile: ' + String($json.result[0].mobile).slice(0, 100)\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2112,
+        208
+      ],
+      "id": "63acf29a-1941-4a4f-b208-86016f016068",
+      "name": "Log Invalid Phone to Postgres",
+      "credentials": {
+        "postgres": {
+          "id": "y2nAbTclC3hrUYaR",
+          "name": "Postgres account"
+        }
+      }
     }
   ],
   "pinData": {},
@@ -492,7 +574,7 @@
       "main": [
         [
           {
-            "node": "Format WhatsApp Number",
+            "node": "Normalize Phone",
             "type": "main",
             "index": 0
           }
@@ -591,6 +673,46 @@
       ]
     },
     "Log Skip to Postgres": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Invoices",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Phone": {
+      "main": [
+        [
+          {
+            "node": "Valid Number?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid Number?": {
+      "main": [
+        [
+          {
+            "node": "Format WhatsApp Number",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Invalid Phone to Postgres",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Invalid Phone to Postgres": {
       "main": [
         [
           {

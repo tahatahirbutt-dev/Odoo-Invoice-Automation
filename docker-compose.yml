@@ -68,6 +68,7 @@ services:
     container_name: n8n_invoice_automation
     environment:
       # Basic n8n settings
+      DEFAULT_COUNTRY_CODE: ${DEFAULT_COUNTRY_CODE}
       N8N_HOST: n8n.tahatahirbutt.me
       N8N_PORT: 5678
       N8N_PROTOCOL: https
