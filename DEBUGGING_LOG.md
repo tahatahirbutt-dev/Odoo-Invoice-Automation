@@ -266,6 +266,44 @@ prefixed form is rejected (`value too long for type character varying(20)`).
 **Lesson:** When a field is always empty, find out why before filling it —
 the emptiness may be covering for something else.
 
+### 14. The failed-send branch had never run — first run found two more gaps
+**Symptom:** None. The branch (`Send via Twilio` error output → `Log Failure to
+Postgres` → back to the loop) was built in October but no send had failed since,
+so it had never executed. I tested it on purpose with a customer whose Mobile
+was `0300 1234567` (invoice `INV/2026/00006`), then ran the workflow twice.
+**Result, run 1 (execution #674):** Twilio rejected the send with
+`400 / code 21211: The 'To' number +03001234567 is not a valid phone number`.
+The error output was taken, `Log Failure to Postgres` wrote a `failed` row
+(id 30, with the Twilio error text and `customer_phone` = `+03001234567`), the
+loop continued, and the three no-phone invoices after it were still processed.
+The branch works.
+**Result, run 2:** `INV/2026/00006` was fetched again and a second `failed` row
+was written (id 34). Nothing stops a failed invoice from being retried on every
+run.
+**Gaps this exposed:**
+1. **No phone normalization.** The workflow strips non-digits from Odoo's Mobile
+   field and prepends `+`. A local-format number (`0300…`) becomes
+   `+03001234567`, which is not valid E.164. Nothing validates the number
+   before the send.
+2. **Unbounded retry.** Only `sent` invoices are excluded from the next run, so
+   an invoice that fails permanently (bad number) is re-sent every 2 hours
+   forever, adding a `failed` row each time. The README called this "no
+   automatic retry"; it is automatic, uncapped retry.
+3. **Failures look like success.** Execution #674 shows **Succeeded** in the
+   Executions list even though the send failed, because the error output is
+   handled. The audit table is the only place the failure is visible, and
+   nothing alerts anyone.
+**Status:** Reproduced, not yet fixed. Planned: validate/normalize the number
+before sending and log `skipped_invalid_phone`; stop retrying after N `failed`
+rows; add an alert or a daily failed-count check.
+**Not tested:** a Twilio rejection that arrives *after* acceptance (for example
+63015 for a number that has not joined the sandbox). `sent` would still be
+written for those, and no status callback exists to correct it.
+**Lesson:** A branch that has never executed is a hypothesis, not a feature.
+Testing it on purpose took 20 minutes and found three gaps that no amount of
+reading the workflow showed.
+
+
 ### Related: Twilio said `queued`, nothing arrived
 Not a workflow bug. Cloudflare Access was redirecting Twilio's PDF fetch to a
 login page. See `DEPLOYMENT_LOG.md`, entry 13.
