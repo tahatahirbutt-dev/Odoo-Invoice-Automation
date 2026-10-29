@@ -266,7 +266,7 @@ prefixed form is rejected (`value too long for type character varying(20)`).
 **Lesson:** When a field is always empty, find out why before filling it —
 the emptiness may be covering for something else.
 
-### 14. The failed-send branch had never run — first run found two more gaps
+### 14. The failed-send branch had never run — first run found three more gaps
 **Symptom:** None. The branch (`Send via Twilio` error output → `Log Failure to
 Postgres` → back to the loop) was built in October but no send had failed since,
 so it had never executed. I tested it on purpose with a customer whose Mobile
@@ -277,7 +277,7 @@ The error output was taken, `Log Failure to Postgres` wrote a `failed` row
 (id 30, with the Twilio error text and `customer_phone` = `+03001234567`), the
 loop continued, and the three no-phone invoices after it were still processed.
 The branch works.
-**Result, run 3:** `INV/2026/00006` was fetched again and a second `failed` row
+**Result, run 2:** `INV/2026/00006` was fetched again and a second `failed` row
 was written (id 34). Nothing stops a failed invoice from being retried on every
 run.
 **Gaps this exposed:**
