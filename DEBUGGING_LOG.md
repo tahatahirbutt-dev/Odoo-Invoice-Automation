@@ -277,7 +277,7 @@ The error output was taken, `Log Failure to Postgres` wrote a `failed` row
 (id 30, with the Twilio error text and `customer_phone` = `+03001234567`), the
 loop continued, and the three no-phone invoices after it were still processed.
 The branch works.
-**Result, run 2:** `INV/2026/00006` was fetched again and a second `failed` row
+**Result, run 3:** `INV/2026/00006` was fetched again and a second `failed` row
 was written (id 34). Nothing stops a failed invoice from being retried on every
 run.
 **Gaps this exposed:**
