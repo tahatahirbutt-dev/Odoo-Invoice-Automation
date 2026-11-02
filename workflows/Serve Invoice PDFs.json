@@ -46,6 +46,15 @@
           },
           "conditions": [
             {
+              "id": "01e0d40c-f8bc-4a1e-8ab8-8c61fd642bb5",
+              "leftValue": "={{ $env.PDF_LINK_SECRET || '' }}",
+              "rightValue": "^[0-9a-f]{64}$",
+              "operator": {
+                "type": "string",
+                "operation": "regex"
+              }
+            },
+            {
               "id": "630eb610-bb5d-457e-b4d9-4a6f08b66ade",
               "leftValue": "={{ $json.query.invoice_id }}",
               "rightValue": "^\\d{1,9}$",
@@ -198,7 +207,7 @@
     },
     {
       "parameters": {
-        "content": "## Serve Invoice PDFs\nBuilt: 2026-07-08 | Revised: 2026-10-07 (retest pending) | Stateless webhook, no file storage\n\nTwilio's WhatsApp API fetches media from a URL rather than accepting attachments directly. This workflow answers that fetch: it re-authenticates to Odoo and re-renders the requested invoice fresh, every call.\n\n**Access control:** the URL must carry `invoice_id`, `exp` (unix seconds) and `token` = HMAC-SHA256(\"invoice_id.exp\", PDF_LINK_SECRET). Anything else - bad id format, expired link, wrong token - gets a 403 and never reaches Odoo. The main workflow signs the links.\n\nMust be toggled **Active** (not just open) for the webhook to respond.",
+        "content": "## Serve Invoice PDFs\nBuilt: 2026-07-08 | Revised: 2026-10-07 (retest pending) | Stateless webhook, no file storage\n\nTwilio's WhatsApp API fetches media from a URL rather than accepting attachments directly. This workflow answers that fetch: it re-authenticates to Odoo and re-renders the requested invoice fresh, every call.\n\n**Access control:** the URL must carry `invoice_id`, `exp` (unix seconds) and `token` = HMAC-SHA256(\"invoice_id.exp\", PDF_LINK_SECRET). Anything else - bad id format, expired link, wrong token - gets a 403 and never reaches Odoo. If PDF_LINK_SECRET is missing or is not 64 hex characters, every request gets a 403 (an empty key would make links forgeable). The main workflow signs the links.\n\nMust be toggled **Active** (not just open) for the webhook to respond.",
         "height": 380,
         "width": 1600
       },
