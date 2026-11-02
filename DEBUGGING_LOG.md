@@ -1,7 +1,8 @@
 # Technical Journal — Serve Invoice PDFs Webhook & End-to-End WhatsApp Delivery
 
-> **How to read this file.** Part 1 (July 2026) is the original build: bugs 1–8. Part 2 (October 2026) is
-> what turned up when the working system was re-read and re-tested against the real stack: bugs 9–13.
+> **How to read this file.** Part 1 (July 2026) is the original build: bugs 1–8.
+ Part 2 (October–November 2026) is
+> what turned up when the working system was re-read and re-tested against the real stack: bugs 9–16.
 > Infrastructure problems (tunnel, Cloudflare Access, compose, fresh-clone startup) are in `DEPLOYMENT_LOG.md`.
 > For the current design, see `README.md`.
 
@@ -168,7 +169,7 @@ no file-system state to manage or go stale.
 
 ---
 
-# Part 2 — Hardening (October 2026)
+# Part 2 — Hardening (October–November 2026)
 
 Found by re-reading the exported workflows and running them against the real
 stack, one change at a time. Most of these produced **no error at all**, which
@@ -228,6 +229,7 @@ and a comma-separated id signed with a valid token → all `403`. These are now
 `tests/webhook_security.ps1`.
 **Known limit:** the token comparison is not constant-time (n8n expressions
 cannot do that); acceptable over a public tunnel, noted in the README.
+A blank secret defeated this until entry 16.
 **Lesson:** If a public URL has to exist, make the URL carry its own
 authorization, and validate the shape of every input that reaches a downstream
 system.
@@ -296,6 +298,7 @@ run.
 **Status:** Reproduced, not yet fixed. Planned: validate/normalize the number
 before sending and log `skipped_invalid_phone`; stop retrying after N `failed`
 rows; add an alert or a daily failed-count check.
+**Update:** the phone-validation part is fixed in entry 15; the retry cap and the alert are still open.
 **Not tested:** a Twilio rejection that arrives *after* acceptance (for example
 63015 for a number that has not joined the sandbox). `sent` would still be
 written for those, and no status callback exists to correct it.
@@ -341,6 +344,30 @@ The daily summary view has no column for the new status.
 rejection was a fine error message, but by then the invoice had already been
 queued for retry every two hours.
 
+### 16. A blank PDF_LINK_SECRET made every signed link forgeable
+
+**Symptom:** None. Found by review while checking the repo against its own claims, not by a failure. The README says the PDF link "proves permission". That is only true if the secret is set.
+
+**Cause:** `Compute Expected Token` runs HMAC-SHA256 with `{{ $env.PDF_LINK_SECRET }}` as the key. If the variable is blank, the key is empty. An HMAC with an empty key can be computed by anyone, so `Link Valid?` accepted a forged token. Nothing refused to start with a blank value: `.env.example` ships the line empty, and CI only runs `docker compose config -q`, which passes with it empty. The lint rules checked that an IF gate exists, not what the IF compares, so they could not see it.
+
+**Reproduced before the fix (2 Nov 2026):** With `PDF_LINK_SECRET=` blank (`docker compose exec n8n printenv PDF_LINK_SECRET` printed an empty line), a link signed with an empty key returned `200 application/pdf` for `invoice_id=1`, and `file` identified the response as a PDF. The first run printed only `200`; I re-ran it with the content type because entry 12 showed a 200 can hide a login page.
+
+**Fix:** `Link Valid?` in `Serve Invoice PDFs` has a new first condition: `{{ $env.PDF_LINK_SECRET || '' }}` must match `^[0-9a-f]{64}$`. A missing, short or non-hex secret now returns 403 for every request, before Odoo is contacted. `scripts/lint_workflows.py` has a new `secret-gate` rule: the serve workflow must contain an IF that references `$env.PDF_LINK_SECRET`. `tests/weak_secret.sh` signs a link with a deliberately weak key and expects 403.
+
+**Verified:**
+- Same forged request after importing the fix, secret still blank: `403`.
+- With the real 64-hex secret: `tests/webhook_security.ps1` passed all 7 cases, including the valid signed link returning `200 application/pdf`.
+- With `PDF_LINK_SECRET=x` (valid signature for that key): `SECRET=x ./tests/weak_secret.sh` printed `PASS` (got 403).
+- `python3 scripts/lint_workflows.py` passes on the fixed workflow. In a scratch copy, the old Serve workflow and the fixed one with the new condition deleted both fail the `secret-gate` rule.
+
+**Wrong turns:** I first tested the PowerShell script from WSL, where it cannot run, then from PowerShell, where the default execution policy refused an unsigned script. It needs `powershell -ExecutionPolicy Bypass -File .\tests\webhook_security.ps1`.
+
+**Known gaps:**
+- The workflow check is the only protection. Compose still starts with a blank value (`${PDF_LINK_SECRET:?…}` is not added yet).
+- `weak_secret.sh` and `webhook_security.ps1` are manual and need the running stack; CI does not run them.
+- The token comparison is still not constant-time (already documented).
+
+**Lesson:** A check that a gate exists is not a check that the gate holds. The lint passed on a gate whose key could be empty. Prove a security gap on the live stack before fixing it, and keep the proof as a test.
 
 ### Related: Twilio said `queued`, nothing arrived
 Not a workflow bug. Cloudflare Access was redirecting Twilio's PDF fetch to a
